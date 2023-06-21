@@ -3,7 +3,6 @@ include $(ROOT)/plat.mk
 
 VPATH = $(ROOT)/src/
 
-CCTOOLS_PATH=/tgdesenv/src/proj0/up21/cctools
 
 INCS=\
 -I$(CCTOOLS_PATH)/include \
