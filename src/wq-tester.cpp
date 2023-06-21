@@ -30,7 +30,7 @@ struct work_queue_task* make_task(int ntask, int input_size, int run_time,
     work_queue_task_specify_cores(t,1);
 
     if(category && strlen(category) > 0)
-        work_queue_task_specify_category(t, category);
+       work_queue_task_specify_category(t, category);
 	return t;
 }
 
@@ -95,6 +95,7 @@ int main(int argc, char *argv[]) {
             taskid = wq_submit_speculative(q, t, tasks);
         else
             taskid = work_queue_submit(q, t);
+        printf("Submitted task %d with command '%s'.\n", taskid, t->command_line);
     }
     struct work_queue_task *t = nullptr;
     struct work_queue_stats s;
