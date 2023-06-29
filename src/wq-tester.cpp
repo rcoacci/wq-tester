@@ -14,7 +14,7 @@ extern "C" {
 
 using namespace std;
 
-struct work_queue_task* make_task(int ntask, int input_size, int run_time,
+struct work_queue_task* make_dummy_task(int ntask, int input_size, int run_time,
                                   int output_size, double chance, char *category)
 {
 	char tasklog[128], input_file[128], command[256];
@@ -34,6 +34,27 @@ struct work_queue_task* make_task(int ntask, int input_size, int run_time,
        work_queue_task_specify_category(t, category);
 	return t;
 }
+
+struct work_queue_task* make_sort_task(int ntask, char *category)
+{
+	char output_file[128], tasklog[128], input_file[128], command[256];
+
+    sprintf(input_file, "input%d", ntask);
+    sprintf(output_file, "output.%d", ntask);
+    sprintf(tasklog, "task-%03d.log", ntask);
+    sprintf(command, "sort -g --parallel=1 -o outfile infile &> task.log");
+
+    struct work_queue_task *t = work_queue_task_create(command);
+    work_queue_task_specify_file(t, input_file, "infile", WORK_QUEUE_INPUT, WORK_QUEUE_NOCACHE);
+    work_queue_task_specify_file(t, tasklog, "task.log", WORK_QUEUE_OUTPUT, WORK_QUEUE_WATCH);
+    work_queue_task_specify_file(t, output_file, "outfile", WORK_QUEUE_OUTPUT, WORK_QUEUE_NOCACHE);
+    work_queue_task_specify_cores(t,1);
+
+    if(category && strlen(category) > 0)
+       work_queue_task_specify_category(t, category);
+	return t;
+}
+
 
 int main(int argc, char *argv[]) {
 
@@ -72,6 +93,9 @@ int main(int argc, char *argv[]) {
                 exit(1);
         }
     }
+    bool dummy_task = false;
+    if (optind < argc){
+        if (string(argv[optind]) == "dummy") dummy_task = true;
     }
     if(backup_tasks && spec_exec>0.0) fatal("Can't enable backup tasks and speculative execution together\n");
     if (wait < 10) wait = 10;
@@ -95,7 +119,11 @@ int main(int argc, char *argv[]) {
 
     printf("Submitting %d tasks.\n", num_tasks);
     for (int i=0; i < num_tasks; i++){
-        struct work_queue_task* t = make_task(i, 800, base_runtime, 500, chance, nullptr);
+        struct work_queue_task* t;
+        if (dummy_task)
+           t = make_dummy_task(i, 800, base_runtime, 500, chance, nullptr);
+        else
+           t = make_sort_task(i, nullptr);
         int taskid = wq_submit(wq, t);
         printf("Submitted task %d with command '%s'.\n", taskid, t->command_line);
     }

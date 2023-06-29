@@ -21,10 +21,10 @@ LIBS=\
 CCFLAGS=$(CCFLAGS_BASE) $(CCFLAGS_OPT)
 CXXFLAGS=$(CXXFLAGS_BASE) $(CXXFLAGS_OPT)
 
-CCFLAGS+= -std=gnu11
-CXXFLAGS+= -std=gnu++17
+CCFLAGS+= -std=gnu11 -ggdb
+CXXFLAGS+= -std=gnu++17 -ggdb
 
-all: wq-tester wq-work
+all: wq-tester wq-work random_input
 
 wq-tester: wq-tester.cpp.o wq_utils.cpp.o
 	@echo "GERANDO EXECUTAVEL $@ ----------------------------------------------------------"
@@ -38,9 +38,14 @@ wq-work: wq-work.cpp.o
 	$(CXX) $(CXXFLAGS) $(CXXLDFLAGS) -o $@ $^ $(LIBS_PATH) $(LIBS)
 	@echo ""
 
+random_input: random_input.cpp.o
+	@echo "GERANDO EXECUTAVEL $@ ----------------------------------------------------------"
+	@echo ""
+	$(CXX) $(CXXFLAGS) $(CXXLDFLAGS) -o $@ $^ $(LIBS_PATH) $(LIBS)
+	@echo ""
 
 clean:
-	-rm wq-tester wq-work *.o
+	-rm wq-tester wq-work random_input *.o
 
 %.c.o: %.c
 	@echo "COMPILANDO FONTE $< ------------------------------------------------------------"
