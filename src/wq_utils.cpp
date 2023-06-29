@@ -5,116 +5,137 @@ extern "C" {
 }
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
-int wq_submit_clone(struct work_queue* q, struct work_queue_task* t, std::unordered_map<int,int>& backup_tasks, int backup_prio){
-    struct work_queue_task* bkp = work_queue_task_clone(t);
-    work_queue_task_specify_category(bkp, "backup");
-    work_queue_task_specify_priority(bkp, backup_prio);
 
-    int original_task = work_queue_submit(q, t);
-    int bkp_task = work_queue_submit(q, bkp);
-    debug(D_WQ, "Submitted backup (speculative) task %d for task %d.", bkp_task, original_task);
-    // Add two mappings, one from the original to the clone
-    backup_tasks[original_task] = bkp_task;
-    // And from the clone to the original.
-    backup_tasks[bkp_task] = original_task;
-    return original_task;
+struct wq_speculative_queue {
+    struct work_queue* q;
+    int multiplier;
+    int priority_change;
+    std::unordered_map<int, work_queue_task*> tasks;
+    std::unordered_map<int,int> replicas;
+
+    wq_speculative_queue(struct work_queue* _q, int mult, int prio):
+        q(_q),multiplier(mult), priority_change(prio), tasks(), replicas(){};
+};
+
+/*
+**
+** Speculative queue
+**
+*/
+/**
+ * If spec_mult > 0.0 creates a queue that replicates tasks when the execution time is >= average*multiplier
+ * If spec_mult == 0 creates a queue that replicates tasks immediatly but makes them lower priority (a.k.a. backup tasks)
+ * if spec_mult < 0.0  creates a queue that never replicates any task which is the reglar Work Queue behavior
+ * */
+wq_speculative_queue *wq_create(int port, double spec_mult) {
+    struct work_queue* q = work_queue_create(port);
+    if(!q) fatal("couldn't listen on any port!");
+    work_queue_specify_transactions_log(q, "transactions.log");
+    printf("listening on port %d...\n", work_queue_port(q));
+    return new wq_speculative_queue(q, spec_mult, spec_mult == 0.0 ? -10 : 10);
 }
 
-struct work_queue_task *wq_wait_clone(struct work_queue *q, int timeout, std::unordered_map<int,int>& backup_tasks){
-    struct work_queue_task* t = work_queue_wait(q, timeout);
-    if(t && t->result == WORK_QUEUE_RESULT_SUCCESS){
-        if (std::strcmp(t->category, "backup")==0)
-            debug(D_WQ, "Backup (speculative) task %d finished before the regular task. Tag: '%s', cmd: '%s'", t->taskid, t->tag, t->command_line);
-        else
-            debug(D_WQ, "Regular task %d finished before the backup task. Tag: '%s', cmd: '%s'", t->taskid, t->tag, t->command_line);
-        auto it = backup_tasks.find(t->taskid);
-        if(it != backup_tasks.end()){
-            debug(D_WQ, "Found task %d pointing to task %d in the map. Cancelling %d.", it->first, it->second, it->second);
-            struct work_queue_task* other = work_queue_cancel_by_taskid(q, it->second);
-            if (other) work_queue_task_delete(other);
-            else debug(D_WQ, "Warning, the mirror task was not returned from WQ!");
-            // Find the mirror task mapping
-            auto it_other = backup_tasks.find(it->second);
-            // Remove both tasks from the map.
-            backup_tasks.erase(it);
-            backup_tasks.erase(it_other);
-        } else
-            debug(D_WQ, "Warning, task %d not found on map!", t->taskid);
+void wq_specify_priority_change(wq_speculative_queue* wq, int change){
+    wq->priority_change = change;
+}
+
+void wq_specify_fast_abort(wq_speculative_queue *wq, double multiplier) {
+    if (multiplier > 0.0) {
+        printf("Activating fast abort with multiplier %f\n", multiplier);
+    } else {
+        printf("Deactivating fast abort\n");
     }
-    return t;
+    work_queue_activate_fast_abort(wq->q, multiplier);
 }
 
-int wq_submit_speculative(struct work_queue* q, struct work_queue_task* t, std::unordered_map<int, work_queue_task*>& tasks){
-    int taskid = work_queue_submit(q, t);
-    tasks[taskid] = t;
+int wq_submit(wq_speculative_queue* wq, work_queue_task* t){
+    int taskid = work_queue_submit(wq->q, t);
+    wq->tasks[taskid] = t;
     return taskid;
 }
 
+static void wq_spec_check_replica(wq_speculative_queue* wq, struct work_queue_task* t){
+    // Does not check any replicas if multiplier is negative.
+    // Allows for regular Work Queue behavior.
+    if (wq->multiplier < 0.0) return;
+    if(wq->replicas.count(t->taskid)>0){
+        if (std::string(t->category) == "replica")
+            debug(D_WQ, "Speculative task %d finished before the regular task. Tag: '%s', cmd: '%s'", t->taskid, t->tag, t->command_line);
+        else
+            debug(D_WQ, "Regular task %d finished before the speculative task. Tag: '%s', cmd: '%s'", t->taskid, t->tag, t->command_line);
 
-static int wq_spec_check_replica(struct work_queue * q, struct work_queue_task* t,
-                                 std::unordered_map<int,int>& replicas) {
-    int replica = -1;
-    auto it = replicas.find(t->taskid);
-    if(it != replicas.end()){
-        debug(D_WQ, "Found task %d pointing to task %d in the map. Cancelling %d.", it->first, it->second, it->second);
-        replica = it->second;
-        struct work_queue_task* other = work_queue_cancel_by_taskid(q, it->second);
-        if (other) work_queue_task_delete(other);
+        int replica_id = wq->replicas[t->taskid];
+        debug(D_WQ, "Found task %d pointing to task %d in the map. Cancelling %d.", t->taskid, replica_id, replica_id);
+        struct work_queue_task* other = work_queue_cancel_by_taskid(wq->q, replica_id);
+        if (other) {
+            work_queue_task_delete(other);
+            // try to remove the mirror task from our main task list.
+            // If it's a replica, it won't be found and nothing will be removed.
+            wq->tasks.erase(replica_id);
+        }
         else debug(D_WQ, "Warning, the mirror task was not returned from WQ!");
         // Remove both tasks from the map.
-        replicas.erase(it);
-        // Find the mirror task mapping
-        replicas.erase(replicas.find(it->second));
+        wq->replicas.erase(t->taskid);
+        // Erase the mirror task mapping
+        wq->replicas.erase(replica_id);
     } // else ok, not all tasks will have replicas
-    return replica;
 }
 
-static void wq_spec_submit_replicas(struct work_queue *q, double spec_mult,
-                             std::unordered_map<int,int>& replicas,
-                             std::unordered_map<int, work_queue_task*>& tasks){
+static void wq_spec_submit_replicas(wq_speculative_queue *wq){
+    // Does not create any replicas if multiplier is negative.
+    // Allows for regular Work Queue behavior.
+    if (wq->multiplier < 0.0) return;
     struct work_queue_stats s;
-    work_queue_get_stats(q, &s);
+    work_queue_get_stats(wq->q, &s);
     if (s.tasks_done > 5){
         uint64_t average = (s.time_workers_execute_good + s.time_send_good + s.time_receive_good) / s.tasks_done;
-        if (average>1){
+        if (average>0){
             uint64_t now = timestamp_get();
-            uint64_t spec_trigger = average*spec_mult;
+            uint64_t spec_trigger = average*wq->multiplier;
             debug(D_WQ, "Current speculative trigger is %f secs.", spec_trigger*1.e-6);
-            for (auto& p: tasks){
+            for (auto& p: wq->tasks){
                 struct work_queue_task* t1 = p.second;
-                // Ignore tasks that are not running;
-                if(work_queue_task_state(q, t1->taskid) != WORK_QUEUE_TASK_RUNNING) continue;
-                // Ignore tasks that already have replicas
-                if(replicas.find(t1->taskid) != replicas.end()) continue;
-                uint64_t runtime = now - t1->time_when_commit_start;
-                if(runtime >= spec_trigger){
-                    struct work_queue_task* bkp = work_queue_task_clone(t1);
-                    work_queue_task_specify_category(bkp, "backup");
-                    work_queue_task_specify_priority(bkp, t1->priority+1); // Increase priority so we get scheduled ASAP
-                    int bkp_task = work_queue_submit(q, bkp);
-                    debug(D_WQ, "Task %d is taking too long (%f of %f avg), submitting speculative task %d.",
-                          t1->taskid, runtime*1e-6, average*1e-6, bkp_task);
+                // Process tasks that are running and do not have replicas already
+                if (work_queue_task_state(wq->q, t1->taskid) == WORK_QUEUE_TASK_RUNNING &&
+                    wq->replicas.count(t1->taskid)==0) {
+                  uint64_t runtime = now - t1->time_when_commit_start;
+                  int priority = t1->priority + wq->priority_change;
+                  if (runtime >= spec_trigger) {
+                    struct work_queue_task *bkp = work_queue_task_clone(t1);
+                    work_queue_task_specify_category(bkp, "replica");
+                    work_queue_task_specify_priority(bkp, priority);
+                    int replica = work_queue_submit(wq->q, bkp);
+                    debug(D_WQ,
+                          "Task %d is taking too long (%f of %f avg), "
+                          "submitting speculative task %d.",
+                          t1->taskid, runtime * 1e-6, average * 1e-6, replica);
                     // Add two mappings, one from the original to the clone
-                    replicas[t1->taskid] = bkp_task;
+                    wq->replicas[t1->taskid] = replica;
                     // And from the clone to the original.
-                    replicas[bkp_task] = t1->taskid;
+                    wq->replicas[replica] = t1->taskid;
+                  }
                 }
             }
         }
     }
 }
-struct work_queue_task *wq_wait_speculative(struct work_queue *q, int timeout, double spec_mult,
-                                            std::unordered_map<int,int>& replicas,
-                                            std::unordered_map<int, work_queue_task*>& tasks){
-    struct work_queue_task* t = work_queue_wait(q, timeout);
+work_queue_task *wq_wait(wq_speculative_queue* wq, int timeout){
+    wq_spec_submit_replicas(wq);
+    struct work_queue_task* t = work_queue_wait(wq->q, timeout);
     if(t && t->result == WORK_QUEUE_RESULT_SUCCESS){
-        int replica = wq_spec_check_replica(q, t, replicas);
-        if (std::string(t->category) == "backup")
-            tasks.erase(tasks.find(replica));
-        else
-            tasks.erase(tasks.find(t->taskid));
+        wq_spec_check_replica(wq, t);
+        wq->tasks.erase(t->taskid);
     }
-    wq_spec_submit_replicas(q, spec_mult, replicas, tasks);
     return t;
+}
+
+void wq_delete(wq_speculative_queue* wq){
+    work_queue_delete(wq->q);
+    delete wq;
+}
+
+struct work_queue* wq_q(wq_speculative_queue *wq){
+    return wq->q;
 }

@@ -3,6 +3,8 @@
 #include <random>
 #include <unistd.h>
 #include <vector>
+#include <chrono>
+
 extern "C" {
 #include "cctools/work_queue.h"
 #include "cctools/debug.h"
@@ -15,10 +17,9 @@ using namespace std;
 struct work_queue_task* make_task(int ntask, int input_size, int run_time,
                                   int output_size, double chance, char *category)
 {
-	char output_file[128], tasklog[128], input_file[128], command[256];
+	char tasklog[128], input_file[128], command[256];
 
     sprintf(input_file, "input.%d", 0);
-    sprintf(output_file, "output.%d", ntask);
     sprintf(tasklog, "task-%03d.log", ntask);
     sprintf(command, "./wq-work infile %d outfile %d %d %f &> task.log",
             input_size, output_size, run_time, chance);
@@ -36,6 +37,10 @@ struct work_queue_task* make_task(int ntask, int input_size, int run_time,
 
 int main(int argc, char *argv[]) {
 
+    using std::chrono::steady_clock, std::chrono::duration_cast, std::chrono::duration;
+    using std::chrono::seconds, std::chrono::minutes, std::chrono::hours;
+
+    auto start = steady_clock::now();
     debug_flags_set("wq");
     debug_config_file("manager-debug.log");
     char c;
@@ -45,8 +50,8 @@ int main(int argc, char *argv[]) {
     int wait = 60;
     double fast_abort = 0.0;
     bool backup_tasks = false;
-    double spec_exec = 0;
-    while((c = getopt(argc, argv, "n:c:r:t:f:b:s:"))!=-1) {
+    double spec_exec = -1.0;
+    while((c = getopt(argc, argv, "n:c:r:t:f:bs:"))!=-1) {
         switch (c){
             case 'n':
                 num_tasks = atoi(optarg); break;
@@ -59,78 +64,80 @@ int main(int argc, char *argv[]) {
             case 'f':
                 fast_abort = atof(optarg); break;
             case 'b':
-                backup_tasks = true;
+                backup_tasks = true; break;
             case 's':
                 spec_exec = atof(optarg); break;
             default:
                 printf("Usage: %s [-n ntasks] [-c chance] [-r runtime] [-t nsecs] [-f multi] [-b] [-s multi]\n", argv[0]);
+                exit(1);
         }
     }
-    if(backup_tasks && spec_exec>0.0) fatal("can't enable backup tasks and speculative execution together");
+    }
+    if(backup_tasks && spec_exec>0.0) fatal("Can't enable backup tasks and speculative execution together\n");
     if (wait < 10) wait = 10;
-    struct work_queue *q = work_queue_create(WORK_QUEUE_DEFAULT_PORT);
-    if(!q) fatal("couldn't listen on any port!");
-    work_queue_specify_transactions_log(q, "transactions.log");
-    printf("listening on port %d...\n", work_queue_port(q));
-    if(fast_abort>0.0){
-        printf("Activating fast abort with multiplier %f\n", fast_abort);
-        work_queue_activate_fast_abort(q, fast_abort);
-    }
-    if(spec_exec>0.){
-        printf("Activating spectultive execution with multiplier %f\n", spec_exec);
-    }
     printf("Using base runtime %d\n", base_runtime);
     printf("Chance of straggler task %.2f\n", chance);
-    if (backup_tasks) printf("Activating backup tasks.\n");
-    std::unordered_map<int, int> backups;
-    std::unordered_map<int, work_queue_task*> tasks;
-    tasks.reserve(num_tasks);
+
+    if (backup_tasks){
+        printf("Activating backup tasks.\n");
+        spec_exec = 0.0;
+    } else if (spec_exec>0.0){
+        printf("Activating speculative execution with multiplier %f\n", spec_exec);
+    } else
+        printf("Disabling speculative execution\n");
+
+    wq_speculative_queue* wq = wq_create(WORK_QUEUE_DEFAULT_PORT, spec_exec);
+    if (!wq) fatal("Can't create queue!");
+    if (fast_abort > 0.0) {
+        printf("Activating fast abort with multiplier %f\n", fast_abort);
+        wq_specify_fast_abort(wq, fast_abort);
+    }
+
     printf("Submitting %d tasks.\n", num_tasks);
     for (int i=0; i < num_tasks; i++){
         struct work_queue_task* t = make_task(i, 800, base_runtime, 500, chance, nullptr);
-        int taskid;
-        if (backup_tasks)
-            taskid = wq_submit_clone(q, t, backups, -10);
-        else if (spec_exec>0.0)
-            taskid = wq_submit_speculative(q, t, tasks);
-        else
-            taskid = work_queue_submit(q, t);
+        int taskid = wq_submit(wq, t);
         printf("Submitted task %d with command '%s'.\n", taskid, t->command_line);
     }
+
     struct work_queue_task *t = nullptr;
     struct work_queue_stats s;
     double avg_time = 0.;
     vector<pair<int,double>> task_times;
+    printf("Waiting workers\n");
     fflush(stdout);
-    while(!work_queue_empty(q)) {
-        if(backup_tasks)
-            t = wq_wait_clone(q, 60, backups);
-        else if (spec_exec>0.0)
-            t = wq_wait_speculative(q, 60, spec_exec, backups, tasks);
-        else
-            t = work_queue_wait(q, 60);
-        if(t) {
+    struct work_queue* inner_q = wq_q(wq);
+    while(!work_queue_empty(inner_q)) {
+        t = wq_wait(wq, wait);
+        if(t && t->result == WORK_QUEUE_RESULT_SUCCESS) {
             task_times.push_back(make_pair(t->taskid, t->time_workers_execute_last));
             work_queue_task_delete(t);
+        } else {
+            printf("Task %d failed with error %s!\n", t->taskid, work_queue_result_str(t->result));
         }
-        work_queue_get_stats(q, &s);
+        work_queue_get_stats(inner_q, &s);
         if (s.tasks_done > 0)
             avg_time = s.time_workers_execute/double(s.tasks_done);
         printf(
             "|      Workers     ||               Tasks                 |\n"
             "| Connected | Busy || Waiting | Running | Done | Avg Time |\n"
-            "| %9d | %4d || %7d | %7d | %4d | %8.2f |\n\n",
+            "| %9d | %4d || %7d | %7d | %4d | %8.2f |\n",
             s.workers_connected, s.workers_busy,
             s.tasks_waiting, s.tasks_running, s.tasks_done,
             avg_time*1e-6);
+        printf("\033[3A");
     fflush(stdout);
     }
-    work_queue_shut_down_workers(q, 0);
-    work_queue_delete(q);
-    printf("Task execution times:\n");
+    printf("\033[3B");
+    work_queue_shut_down_workers(inner_q, 0);
+    wq_delete(wq);
+    printf("\nTask execution times:\n");
     for (auto& p: task_times){
         printf("Taskid %d: %6.2f\n", p.first, p.second*1e-6);
     }
     printf("Done\n");
+    auto program_time = steady_clock::now() - start;
+    printf("Total program time: %f secs\n",
+           duration<double>(program_time).count());
     return 0;
 }

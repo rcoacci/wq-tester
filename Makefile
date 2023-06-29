@@ -1,5 +1,5 @@
 ROOT=$(realpath $(dir $(lastword $(MAKEFILE_LIST))))
-include $(ROOT)/plat.mk
+-include $(ROOT)/plat.mk
 
 VPATH = $(ROOT)/src/
 

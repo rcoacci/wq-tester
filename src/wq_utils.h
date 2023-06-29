@@ -6,15 +6,21 @@ extern "C" {
 #include "cctools/work_queue.h"
 }
 
-#include <unordered_map>
 
-int wq_submit_clone(struct work_queue* q, struct work_queue_task* t, std::unordered_map<int, int>& backup_tasks, int backup_prio);
+struct wq_speculative_queue;
 
-struct work_queue_task *wq_wait_clone(struct work_queue *q, int timeout,std::unordered_map<int,int>& backup_tasks);
+wq_speculative_queue* wq_create(int port, double spec_mult);
 
-int wq_submit_speculative(struct work_queue* q, struct work_queue_task* t, std::unordered_map<int, work_queue_task*>& tasks);
+struct work_queue* wq_q(wq_speculative_queue *wq);
 
-struct work_queue_task *wq_wait_speculative(struct work_queue *q, int timeout, double spec_mult,
-                                            std::unordered_map<int,int>& replicas,
-                                            std::unordered_map<int, work_queue_task*>& tasks);
+void wq_specify_priority_change(wq_speculative_queue* wq, int change);
+
+void wq_specify_fast_abort(wq_speculative_queue *wq, double multiplier);
+
+int wq_submit(wq_speculative_queue* q, work_queue_task* t);
+
+work_queue_task *wq_wait(wq_speculative_queue* q, int timeout);
+
+void wq_delete(wq_speculative_queue* wq);
+
 #endif // WQ_UTILS_H_
