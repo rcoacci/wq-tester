@@ -126,7 +126,8 @@ work_queue_task *wq_wait(wq_speculative_queue* wq, int timeout){
     struct work_queue_task* t = work_queue_wait(wq->q, timeout);
     if(t && t->result == WORK_QUEUE_RESULT_SUCCESS){
         wq_spec_check_replica(wq, t);
-        wq->tasks.erase(t->taskid);
+        if(wq->tasks.count(t->taskid) > 0)
+            wq->tasks.erase(t->taskid);
     }
     return t;
 }

@@ -128,7 +128,6 @@ int main(int argc, char *argv[]) {
         printf("Submitted task %d with command '%s'.\n", taskid, t->command_line);
     }
 
-    struct work_queue_task *t = nullptr;
     struct work_queue_stats s;
     double avg_time = 0.;
     vector<pair<int,double>> task_times;
@@ -136,13 +135,16 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
     struct work_queue* inner_q = wq_q(wq);
     while(!work_queue_empty(inner_q)) {
-        t = wq_wait(wq, wait);
-        if(t && t->result == WORK_QUEUE_RESULT_SUCCESS) {
-            task_times.push_back(make_pair(t->taskid, t->time_workers_execute_last));
-            work_queue_task_delete(t);
-        } else {
-            printf("Task %d failed with error %s!\n", t->taskid, work_queue_result_str(t->result));
+        struct work_queue_task *t = wq_wait(wq, wait);
+        if(t) {
+            if(t->result == WORK_QUEUE_RESULT_SUCCESS) {
+                task_times.push_back(make_pair(t->taskid, t->time_workers_execute_last));
+                work_queue_task_delete(t);
+            } else {
+                printf("Task %d failed with error %s!\n", t->taskid, work_queue_result_str(t->result));
+            }
         }
+
         work_queue_get_stats(inner_q, &s);
         if (s.tasks_done > 0)
             avg_time = s.time_workers_execute/double(s.tasks_done);
@@ -154,7 +156,7 @@ int main(int argc, char *argv[]) {
             s.tasks_waiting, s.tasks_running, s.tasks_done,
             avg_time*1e-6);
         printf("\033[3A");
-    fflush(stdout);
+        fflush(stdout);
     }
     printf("\033[3B");
     work_queue_shut_down_workers(inner_q, 0);
