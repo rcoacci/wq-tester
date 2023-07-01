@@ -21,8 +21,8 @@ LIBS=\
 CCFLAGS=$(CCFLAGS_BASE) $(CCFLAGS_OPT)
 CXXFLAGS=$(CXXFLAGS_BASE) $(CXXFLAGS_OPT)
 
-CCFLAGS+= -std=gnu11 -ggdb
-CXXFLAGS+= -std=gnu++17 -ggdb
+CCFLAGS+= -std=gnu11 -ggdb -Wall
+CXXFLAGS+= -std=gnu++17 -ggdb -Wall
 
 all: wq-tester wq-work random_input
 
