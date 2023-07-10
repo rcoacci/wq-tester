@@ -28,7 +28,12 @@ def process_task(tasks, m):
         tasks[taskid]["worker"] = m.group("state_args").split()[0]
     if state == "DONE":
         tasks[taskid]["end"] = int(m.group("time"))
-        tasks[taskid]["state_args"] = m.group("state_args").split()[0]
+        state_args = m.group("state_args").split()
+        if (int(state_args[1])) != 0:
+            tasks[taskid]["state_args"] = "FAILED"
+        else:
+            tasks[taskid]["state_args"] = state_args[0]
+
     if state == "CANCELED":
         if tasks[taskid]["start"] > 0:
             tasks[taskid]["end"] = int(m.group("time"))
