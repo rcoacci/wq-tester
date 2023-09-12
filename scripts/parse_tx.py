@@ -1,110 +1,122 @@
 #!/usr/bin/env python3
 import re
-import sys
+import lzma
 
+class TransactionLog:
 
-def process_manager(manager, m):
-    pid = int(m.group("pid"))
-    state = m.group("state")
-    if state == "START":
-        manager["pid"] = pid
-        manager["start"] = int(m.group("time"))
-        manager["end"] = 0
-    elif state == "END":
-        manager["end"] = int(m.group("time"))
+    def __init__(self, jobid, filename):
+        self.manager = {"pid": None, "start": 0, "end": 0}
+        self.tasks = {}
+        self.workers = {}
+        self.jobid = jobid
+        self.filename = Path(filename)
+        self.parse(filename)
 
+    def process_manager(self, m):
+        state = m.group("state")
+        if state == "START":
+            self.manager.update(pid=int(m.group("pid")),
+                                start=int(m.group("time"))/1e6)
+        elif state == "END":
+            self.manager["end"] = int(m.group("time"))/1e6
 
-def process_task(tasks, m):
-    taskid = int(m.group("taskid"))
-    state = m.group("state")
-    if taskid not in tasks:
-        tasks[taskid] = {"wait": 0, "start": 0, "worker": "", "end": 0,
-                         "category": "", "state_args": ""}
-    if state == "WAITING":
-        tasks[taskid]["wait"] = int(m.group("time"))
-        tasks[taskid]["category"] = m.group("state_args").split()[0]
-    if state == "RUNNING":
-        tasks[taskid]["start"] = int(m.group("time"))
-        tasks[taskid]["worker"] = m.group("state_args").split()[0]
-    if state == "DONE":
-        tasks[taskid]["end"] = int(m.group("time"))
-        state_args = m.group("state_args").split()
-        if (int(state_args[1])) != 0:
-            tasks[taskid]["state_args"] = "FAILED"
-        else:
-            tasks[taskid]["state_args"] = state_args[0]
+    def process_task(self, m):
+        taskid = int(m.group("taskid"))
+        state = m.group("state")
+        args = m.group("state_args").split()
+        if taskid not in self.tasks:
+            self.tasks[taskid] = {"wait": 0, "start": 0, "worker": "",
+                                  "end": 0, "category": "", "state_args": ""}
+        if state == "WAITING":
+            self.tasks[taskid].update(wait=int(m.group("time"))/1e6,
+                                      category=args[0])
+        elif state == "RUNNING":
+            self.tasks[taskid].update(start=int(m.group("time"))/1e6,
+                                      worker=args[0])
+        elif state == "DONE":
+            state_args = "FAILED" if int(args[1]) != 0 else args[0]
+            self.tasks[taskid].update(end=int(m.group("time"))/1e6,
+                                      state_args=state_args)
 
-    if state == "CANCELED":
-        if tasks[taskid]["start"] > 0:
-            tasks[taskid]["end"] = int(m.group("time"))
+        elif state == "CANCELED" and self.tasks[taskid]["start"] > 0:
+            self.tasks[taskid]["end"] = int(m.group("time"))/1e6
 
-    tasks[taskid]["state"] = state
+        self.tasks[taskid]["state"] = state
 
+    def process_worker(self, m):
+        state = m.group("state")
+        host = m.group("host")
+        if state == "CONNECTION":
+            self.workers[host] = {"workerid": m.group("workerid"),
+                                  "start": int(m.group("time"))/1e6,
+                                  "end": 0,
+                                  "state_args": ""}
+        if state == "DISCONNECTION":
+            self.workers[host].update(end=int(m.group("time"))/1e6,
+                                      state_args=m.group("state_args"))
 
-def process_worker(workers, m):
-    state = m.group("state")
-    host = m.group("host")
-    if state == "CONNECTION":
-        workers[host] = {"workerid": m.group("workerid"),
-                         "start": int(m.group("time")),
-                         "end": 0,
-                         "state_args": ""}
-    if state == "DISCONNECTION":
-        workers[host]["end"] = int(m.group("time"))
-        workers[host]["state_args"] = m.group("state_args")
+        self.workers[host]["state"] = state
 
-    workers[host]["state"] = state
+    def parse(self, logfile):
+        p_task = re.compile(r"(?P<time>\d+)\s+"
+                            r"(?P<pid>\d+)\s+"
+                            r"TASK\s+(?P<taskid>\d+)"
+                            r"\s+(?P<state>\S+)\s*"
+                            r"(?P<state_args>.+)?", re.X)
+        p_worker = re.compile(r"(?P<time>\d+)\s+"
+                              r"(?P<pid>\d+)\s+"
+                              r"WORKER\s+"
+                              r"(?P<workerid>\S+)\s+"
+                              r"(?P<host>\S+)\s+"
+                              r"(?P<state>CONNECTION|DISCONNECTION)\s*"
+                              r"(?P<state_args>.+)?", re.X)
 
+        p_manager = re.compile(r"(?P<time>\d+)\s+"
+                               r"(?P<pid>\d+)\s+"
+                               r"MANAGER\s+"
+                               r"(?P<state>START|END)\s+", re.X)
 
-def parse(logfile):
-    tasks = {}
-    workers = {}
-    manager = {}
-    p_task = re.compile(r"(?P<time>\d+)\s+"
-                        r"(?P<pid>\d+)\s+"
-                        r"TASK\s+(?P<taskid>\d+)"
-                        r"\s+(?P<state>\S+)\s*"
-                        r"(?P<state_args>.+)?", re.X)
-    p_worker = re.compile(r"(?P<time>\d+)\s+"
-                          r"(?P<pid>\d+)\s+"
-                          r"WORKER\s+"
-                          r"(?P<workerid>\S+)\s+"
-                          r"(?P<host>\S+)\s+"
-                          r"(?P<state>CONNECTION|DISCONNECTION)\s*"
-                          r"(?P<state_args>.+)?", re.X)
+        suffix = self.filename.suffix
+        myopen = lzma.open if suffix == '.xz' else open
+        mode = 'rt' if suffix == '.xz' else 'r'
+        with myopen(logfile, mode) as log:
+            for line in log:
+                if m := p_manager.match(line):
+                    self.process_manager(m)
+                elif m := p_task.match(line):
+                    self.process_task(m)
+                elif m := p_worker.match(line):
+                    self.process_worker(m)
 
-    p_manager = re.compile(r"(?P<time>\d+)\s+"
-                           r"(?P<pid>\d+)\s+"
-                           r"MANAGER\s+"
-                           r"(?P<state>START|END)\s+", re.X)
+    def manager_runtime(self):
+        if (self.manager['end']-self.manager['start'] < 1):
+            raise Exception(f"Manager runtime muito pequeno em {self.filename}: {self.jobid}")
+        return (self.manager['end']-self.manager['start'])
 
-    with open(logfile, 'r') as log:
-        for line in log:
-            if m := p_manager.match(line):
-                process_manager(manager, m)
-            elif m := p_task.match(line):
-                process_task(tasks, m)
-            elif m := p_worker.match(line):
-                process_worker(workers, m)
+    def print_tasks(self):
+        print("JobId;Task ID;Category;Worker;Waiting;Runtime;Status;Extra")
+        for taskid in self.tasks:
+            t = self.tasks[taskid]
+            wait = max(0, (t['start']-t['wait']))
+            runtime = max(0, (t['end']-t['start']))
+            print(f"{self.jobid};{taskid};{t['category']};{t['worker']};"
+                  f"{wait};{runtime};{t['state']};'{t['state_args']}'")
 
-    return [manager, workers, tasks]
+    def print_workers(self):
+        print("JobId;Worker;Runtime;Status;Extra")
+        for worker in self.workers:
+            w = self.workers[worker]
+            print(f"{self.jobid};{worker};{(w['end']-w['start'])};"
+                  f"{w['state']};'{w['state_args']}'")
 
 
 if __name__ == '__main__':
-    manager, workers, tasks = parse(sys.argv[1])
-    print(f"Manager runtime: {(manager['end']-manager['start'])/1e6}s")
+    import sys
+    from pathlib import Path
+    txfile = Path(sys.argv[1])
+    tx = TransactionLog(txfile.parent.stem, txfile)
+    print(f"Manager runtime: {tx.manager_runtime()}s")
     print()
-    print("Task ID;Category;Worker;Waiting;Runtime;Status;Extra")
-    for taskid in tasks:
-        t = tasks[taskid]
-        wait = max(0, (t['start']-t['wait'])/1e6)
-        runtime = max(0, (t['end']-t['start'])/1e6)
-        print(f"{taskid};{t['category']};{t['worker']};"
-              f"{wait};{runtime};{t['state']};'{t['state_args']}'")
-
+    tx.print_tasks()
     print()
-    print("Worker;Runtime;Status;Extra")
-    for worker in workers:
-        w = workers[worker]
-        print(f"{worker};{(w['end']-w['start'])/1e6};"
-              f"{w['state']};'{w['state_args']}'")
+    tx.print_workers()
