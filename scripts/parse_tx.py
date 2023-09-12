@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-import re
-import lzma
+
 
 class TransactionLog:
-
     def __init__(self, jobid, filename):
+        from pathlib import Path
         self.manager = {"pid": None, "start": 0, "end": 0}
         self.tasks = {}
         self.workers = {}
@@ -23,7 +22,7 @@ class TransactionLog:
     def process_task(self, m):
         taskid = int(m.group("taskid"))
         state = m.group("state")
-        args = m.group("state_args").split()
+        args = m["state_args"].split() if m["state_args"] else None
         if taskid not in self.tasks:
             self.tasks[taskid] = {"wait": 0, "start": 0, "worker": "",
                                   "end": 0, "category": "", "state_args": ""}
@@ -58,6 +57,8 @@ class TransactionLog:
         self.workers[host]["state"] = state
 
     def parse(self, logfile):
+        import lzma
+        import re
         p_task = re.compile(r"(?P<time>\d+)\s+"
                             r"(?P<pid>\d+)\s+"
                             r"TASK\s+(?P<taskid>\d+)"
